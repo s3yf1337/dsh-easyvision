@@ -60,40 +60,44 @@ if (!plugin || typeof plugin.apply !== "function" || !Array.isArray(plugin.injec
 console.log("client.js loaded; inject =", JSON.stringify(plugin.inject));
 
 // ── mock settings scope over a memory store ──────────────────────────────
-function memoryScope(initial) {
-	let value = { ...initial };
-	const listeners = new Set();
-	const snapshot = () => ({
-		status: "ready",
-		value: { ...value },
-		base: { ...initial },
-		user: {},
-		revision: 0,
-		writable: true,
-		mode: "host"
-	});
-	return {
-		getSnapshot: () => snapshot(),
-		subscribe: (listener) => {
-			listeners.add(listener);
-			return () => listeners.delete(listener);
-		},
-		set: async (field, v) => {
-			value[field] = v;
-			for (const l of listeners) l();
-		},
-		unset: async (field) => {
-			delete value[field];
-			for (const l of listeners) l();
-		},
-		load: async () => {},
-		dispose: async () => {}
-	};
+// A CLASS with prototype methods backed by `this.store`, exactly like the
+// real SettingsScopeController — this catches unbound-method regressions
+// (`this.store` crashes) when the section hands methods to React.
+class MemoryScope {
+	constructor(initial) {
+		this.store = { value: { ...initial } };
+		this.listeners = new Set();
+	}
+	getSnapshot() {
+		return {
+			status: "ready",
+			value: { ...this.store.value },
+			base: { ...this.store.value },
+			user: {},
+			revision: 0,
+			writable: true,
+			mode: "host"
+		};
+	}
+	subscribe(listener) {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+	async set(field, v) {
+		this.store.value[field] = v;
+		for (const l of this.listeners) l();
+	}
+	async unset(field) {
+		delete this.store.value[field];
+		for (const l of this.listeners) l();
+	}
+	async load() {}
+	async dispose() {}
 }
 
 // ── mock plugin context ──────────────────────────────────────────────────
 const registrations = [];
-const scope = memoryScope({
+const scope = new MemoryScope({
 	provider: "opencode-go",
 	model: "qwen3.7-plus",
 	maxTokens: 4096,
