@@ -14,6 +14,25 @@ registers one tool, `describe_image`, which reads the image files through
 provider's own key resolution, retry policy, and middleware — and returns the
 description as plain text.
 
+## Configuration — Settings → EasyVision
+
+The vision model (and everything else about the call) is configured in the
+dsh **Settings** UI (the EasyVision page), which writes the `easyvision:`
+section of `~/.dsh/settings.yaml` — no file editing needed:
+
+| Field | Meaning |
+|---|---|
+| Provider | Provider route owning the vision model (from the dsh model list). |
+| Vision model | Model id from that provider's model list; must accept image input. |
+| Max tokens | Optional output cap for the vision call; empty = adapter default. |
+| System prompt | System prompt sent to the vision model before every call. |
+| Default prompt | Question used when `describe_image` is called without a prompt. |
+
+The profile's entry config (the `config:` block in `cordis.patch.yml`) acts as
+the composition **base** layer: any field not overridden in Settings inherits
+it, and a "Reset to default" restores it. Changes apply **live** — the tool
+re-reads the resolved section on every call, no restart needed.
+
 ## How it works
 
 ```
@@ -66,14 +85,17 @@ for `web`/`headless`):
    (`~/.dsh/settings.yaml` or via Settings → Models) and the provider must
    actually serve it.
 
-## Configuration
+## Plugin configuration (composition base)
+
+The `config:` block in the profile patch doubles as the **base layer** of the
+`easyvision` settings namespace (what Settings overrides inherit from):
 
 | Key | Default | Meaning |
 |---|---|---|
 | `provider` | `opencode-go` | Provider route owning the vision model. |
 | `model` | `qwen3.7-plus` | Model id from that provider's model list; must accept image input. |
 | `maxTokens` | *(adapter default)* | Optional output cap for the vision call. |
-| `toolName` | `describe_image` | Model-facing tool name. |
+| `toolName` | `describe_image` | Model-facing tool name (entry-config only). |
 | `systemPrompt` | "You are a helpful vision assistant…" | System prompt sent to the vision model. |
 | `defaultPrompt` | "Describe what you see…" | Question used when the model calls the tool without an explicit `prompt`. |
 
