@@ -14,19 +14,30 @@ registers one tool, `describe_image`, which reads the image files through
 provider's own key resolution, retry policy, and middleware — and returns the
 description as plain text.
 
+## Install — one command
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/s3yf1337/dsh-easyvision/main/install.sh | bash
+```
+
+Or from a checkout: `./install.sh`. The script is idempotent and safe to
+re-run; it installs the plugin into `$DSH_HOME/plugins/dsh-easyvision`,
+registers it in the `desktop` profile (override with `--profile NAME`),
+patches the installed `dsh-host-apiproxy` so the Settings page can expose the
+namespace, and restarts the harness. `--no-restart` skips the restart,
+`--link` symlinks a development checkout instead of copying.
+
 ## Configuration — Settings → EasyVision
 
-The vision model (and everything else about the call) is configured in the
-dsh **Settings** UI (the EasyVision page), which writes the `easyvision:`
-section of `~/.dsh/settings.yaml` — no file editing needed:
+Configured in the dsh **Settings** UI (the EasyVision page), which writes the
+`easyvision:` section of `~/.dsh/settings.yaml` — no file editing needed:
 
-| Field | Meaning |
+| Control | Meaning |
 |---|---|
-| Provider | Provider route owning the vision model (from the dsh model list). |
-| Vision model | Model id from that provider's model list; must accept image input. |
-| Max tokens | Optional output cap for the vision call; empty = adapter default. |
-| System prompt | System prompt sent to the vision model before every call. |
-| Default prompt | Question used when `describe_image` is called without a prompt. |
+| **Vision model** (picker) | Pick any model from your dsh model list, grouped by provider — the same catalog the composer's model picker uses. Only models that accept image input work; a text-only pick is refused by the tool with a clear message. |
+| Advanced → Max tokens | Optional output cap for the vision call; empty = adapter default. |
+| Advanced → System prompt | System prompt sent to the vision model before every call. |
+| Advanced → Default prompt | Question used when `describe_image` is called without a prompt. |
 
 The profile's entry config (the `config:` block in `cordis.patch.yml`) acts as
 the composition **base** layer: any field not overridden in Settings inherits
@@ -56,20 +67,14 @@ main model (text-only) ──describe_image(paths, prompt?)──▶ plugin
   the same attachment pipeline as `read_image`.
 * The tool registers only while a durable attachment store is mounted.
 
-## Installation
+## Manual installation
 
-Add the plugin to a profile (the examples use the `desktop` profile, adjust
-for `web`/`headless`):
+For profiles the script does not target, or when you prefer to wire it by
+hand:
 
-1. Install the package into the profile:
-
-   ```bash
-   dsh plugin --profile desktop add dsh-easyvision
-   # or, for a local checkout:
-   #   add "dsh-easyvision": "file:/path/to/dsh-easyvision" to the profile's package.json
-   #   and run pnpm install in the profile directory
-   ```
-
+1. Add `"dsh-easyvision": "file:/path/to/dsh-easyvision"` to the profile's
+   `package.json` dependencies and link it into the profile's `node_modules`
+   (or `dsh plugin --profile NAME add dsh-easyvision`).
 2. Load it in the profile's `cordis.patch.yml`:
 
    ```yaml
@@ -82,11 +87,7 @@ for `web`/`headless`):
    ```
 
 3. Expose the settings namespace to the web client (one-time, idempotent;
-   re-run after every dsh upgrade):
-
-   ```bash
-   node scripts/patch-dsh-host.mjs
-   ```
+   re-run after every dsh upgrade): `node scripts/patch-dsh-host.mjs`.
 
    The harness's API gateway serves only an explicit allowlist of settings
    namespaces to the browser, and there is no plugin seam for extending it

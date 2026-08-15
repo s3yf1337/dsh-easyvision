@@ -3,9 +3,12 @@
 // Loads the REAL client.js module against real react, with
 // @deepseek-ai/dsh-client-ui-primitives STUBBED, runs its apply() with a mock
 // plugin context (slots registry + settingsScope binder backed by a memory
-// store), then server-renders the EasyVision settings section with a ready
-// snapshot. This checks the import-name contract of the primitives, the slot
-// registration contract, and that the section renders.
+// store + connection/remote for the model catalog), then server-renders the
+// EasyVision settings section with a ready snapshot. This checks the
+// import-name contract of the primitives, the slot registration contract,
+// and that the section renders. The picker's option builder is a pure
+// function and is exercised directly against a fake catalog (SSR cannot run
+// the async catalog effect).
 //
 // Run: node test/client-smoke.mjs  (set DSH_NM to the dsh install when dsh
 // lives elsewhere than the default below)
@@ -104,11 +107,29 @@ const scope = new MemoryScope({
 	systemPrompt: "You are a helpful vision assistant.",
 	defaultPrompt: "Describe what you see."
 });
+const CATALOG = {
+	result: {
+		ok: true,
+		value: {
+			groups: [
+				{ id: "opencode-go", name: "opencode-go", models: [
+					{ id: "qwen3.7-plus", name: "Qwen3.7 Plus" },
+					{ id: "kimi-k2.6", name: "Kimi K2.6" },
+					{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }
+				] },
+				{ id: "deepseek-official", name: "DeepSeek Official", models: [
+					{ id: "deepseek-v3.2", name: "DeepSeek V3.2" }
+				] }
+			],
+			failures: []
+		}
+	}
+};
 const mockCtx = {
 	slots: {
 		inject: (name, factory) => {
 			const registration = factory();
-			registrations.push({ slot: registration.name, id: registration.id, order: registration.order, label: registration.label(), component: registration.component });
+			registrations.push({ slot: registration.name, id: registration.id, order: registration.order, label: registration.label(), component: registration.component, injected: registration.inject() });
 		},
 		register: (...args) => ({ ...args[0], component: args[1] })
 	},
@@ -119,6 +140,16 @@ const mockCtx = {
 				return scope;
 			}
 		};
+		if (key === "connection") return {
+			api: {
+				llm: {
+					models: async () => JSON.parse(JSON.stringify(CATALOG))
+				}
+			}
+		};
+		if (key === "remote") return {
+			$on: () => () => {}
+		};
 		return void 0;
 	}
 };
@@ -128,18 +159,42 @@ const section = registrations.find((r) => r.slot === "settings.section" && r.id 
 if (!section) throw new Error("settings.section registration missing");
 console.log("settings.section registered:", JSON.stringify({ id: section.id, order: section.order, label: section.label }));
 
+// ── picker option builder (pure) ─────────────────────────────────────────
+const groups = CATALOG.result.value.groups;
+const opts = plugin.pickerOptions(
+	{ status: "ready" },
+	groups,
+	"opencode-go",
+	"qwen3.7-plus",
+	true,
+	"opencode-go\u0000qwen3.7-plus"
+);
+if (opts.length !== 2) throw new Error(`expected 2 optgroups, got ${opts.length}`);
+if (opts[0].type !== "optgroup" || opts[0].props.label !== "opencode-go") throw new Error("first optgroup label mismatch");
+const qwen = opts[0].props.children.find((o) => o.props.value === "opencode-go\u0000qwen3.7-plus");
+if (!qwen || !qwen.props.children.includes("Qwen3.7 Plus")) throw new Error("qwen3.7-plus option missing from picker");
+const flash = opts[0].props.children.find((o) => o.props.value === "opencode-go\u0000deepseek-v4-flash");
+if (!flash) throw new Error("deepseek-v4-flash option missing from picker");
+// Fallback option for a selection absent from the catalog.
+const fallback = plugin.pickerOptions({ status: "ready" }, groups, "opencode-go", "mimo-v2.5", false, "opencode-go\u0000mimo-v2.5");
+if (fallback[0].props.value !== "opencode-go\u0000mimo-v2.5" || !String(fallback[0].props.children).includes("not in the model list")) {
+	throw new Error("fallback option for a missing model missing");
+}
+console.log("picker option builder OK (optgroups, models, fallback for unlisted model)");
+
 // ── render the section with the injected scope ───────────────────────────
 const Section = section.component;
-const html = renderToString(h(Section, { scope, close: () => {} }));
-for (const expected of ["EasyVision", "opencode-go", "qwen3.7-plus", "4096", "You are a helpful vision assistant.", "Describe what you see.", "Vision model", "Provider", "Max tokens", "System prompt", "Default prompt"]) {
+const injected = section.injected;
+const html = renderToString(h(Section, { ...injected, close: () => {} }));
+for (const expected of ["EasyVision", "Vision model", "Advanced", "Max tokens", "System prompt", "Default prompt", "live"]) {
 	if (!html.includes(expected)) throw new Error(`rendered section missing "${expected}"`);
 }
-console.log("section renders all fields with committed values OK");
+console.log("section renders picker + advanced fold OK");
 
 // ── interactions: write through the scope and re-render ──────────────────
 scope.set("model", "mimo-v2.5").then(async () => {
 	await scope.set("provider", "opencode-go");
-	const html2 = renderToString(h(Section, { scope, close: () => {} }));
+	const html2 = renderToString(h(Section, { ...injected, close: () => {} }));
 	if (!html2.includes("mimo-v2.5")) throw new Error("re-render did not pick up the model write");
 	console.log("section re-renders after settings write OK");
 	console.log("client smoke test PASSED");
