@@ -1,0 +1,22 @@
+# ── test images: never commit pictures into the repo ──────────────────────
+testpics/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+
+# ── dependencies and build artifacts ──────────────────────────────────────
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# ── logs and local state ──────────────────────────────────────────────────
+*.log
+.DS_Store
+*.local
+
+# ── editor cruft ──────────────────────────────────────────────────────────
+.idea/
+.vscode/

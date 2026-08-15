@@ -1,0 +1,31 @@
+{
+  "name": "dsh-easyvision",
+  "version": "0.1.0",
+  "description": "A DeepSeek Harness plugin that describes images through a dedicated vision model from the dsh model list (e.g. mimo-v2.5), called over the harness's own LLM runtime.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "vision",
+    "image",
+    "multimodal"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-attachment": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-fs": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.0.0"
+  }
+}
