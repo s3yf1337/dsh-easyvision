@@ -5,6 +5,7 @@ testpics/
 *.png
 *.webp
 *.gif
+!docs/settings-easyvision.png
 
 # ── dependencies and build artifacts ──────────────────────────────────────
 node_modules/
