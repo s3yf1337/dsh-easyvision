@@ -81,7 +81,22 @@ for `web`/`headless`):
            model: qwen3.7-plus
    ```
 
-3. Restart the harness. The model must be present in your dsh model list
+3. Expose the settings namespace to the web client (one-time, idempotent;
+   re-run after every dsh upgrade):
+
+   ```bash
+   node scripts/patch-dsh-host.mjs
+   ```
+
+   The harness's API gateway serves only an explicit allowlist of settings
+   namespaces to the browser, and there is no plugin seam for extending it
+   yet (the harness marks that as deferred work), so this script adds
+   `easyvision` to `WEB_SETTINGS_NAMESPACES` in the installed
+   `@deepseek-ai/dsh-host-apiproxy`. Without it the Settings page shows
+   "unavailable" while the tool itself keeps working from the composition
+   base.
+
+4. Restart the harness. The model must be present in your dsh model list
    (`~/.dsh/settings.yaml` or via Settings → Models) and the provider must
    actually serve it.
 
