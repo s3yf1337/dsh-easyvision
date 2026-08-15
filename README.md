@@ -79,17 +79,22 @@ $ dsh "what's in testpics/1.jpg?"
 Two entry points, one pipeline:
 
 ```
-composer: drop an image into the chat  ──▶  host session.prompt admission
+composer: drop an image into the chat ──▶ host session.prompt admission
                                               │  model text-only?
                                               ▼
-                                    easyvision bridge (ctx service)
-                                              │  validate + save image
-                                              ▼
+                          easyvision bridge (ctx service, health check)
+                                              │  admitted AS-IS: the message
+                                              ▼  keeps its real image blocks
+                        the chat shows the picture; the model request is
+                        transformed at dispatch time (llm prepareCall/stream):
+                                              │
                          ctx.llm.stream(provider, model, messages=[image blocks + prompt])
                                               │
                                    vision model (e.g. qwen3.7-plus)
                                               │
-                         description text ──▶ admitted as the user message
+                    description text replaces the image blocks in the request
+                                              │
+                               text-only model reads the description
 
 model turn: describe_image(paths, prompt?) ──▶ same vision pipeline, called as a tool
 ```
@@ -97,14 +102,19 @@ model turn: describe_image(paths, prompt?) ──▶ same vision pipeline, calle
 The `install.sh` / `scripts/patch-dsh-host.mjs` host patch changes the
 `session.prompt` admission: when the conversation model is text-only and the
 message carries images, the host asks the plugin's `easyvision` service to
-describe them instead of refusing outright. The prompt is admitted **only**
-when the service is present (plugin active) and the configured model resolves
-and declares `image` input (plugin configured and healthy). Otherwise the
-client gets an actionable error naming the fix (see Troubleshooting).
+confirm it can take them instead of refusing outright. The prompt is admitted
+**only** while the service is present (plugin active) and the configured
+model resolves and declares `image` input (plugin configured and healthy) —
+and the message keeps its real image blocks, so the web chat shows the
+picture. The describing itself happens at dispatch time: the plugin wraps the
+shared LLM runtime's `prepareCall`/`stream`, and any request whose model is
+text-only has its user-message image blocks replaced by the EasyVision
+description before the adapter sees them. Otherwise the client gets an
+actionable error naming the fix (see Troubleshooting).
 
 The plugin validates the configured model against your dsh model list and
 refuses to run when it is missing or does not declare `image` input — before
-any filesystem I/O.
+any image bytes are accepted.
 
 ## Configuration
 
@@ -152,8 +162,12 @@ error code tells you what to fix:
 | `easyvision-unavailable` | the plugin is not loaded/active in this profile | add it to the profile (`install.sh`, or the `cordis.patch.yml` row) and restart |
 | `easyvision-not-configured` | the resolved vision model is not in your dsh model list | open Settings → EasyVision and pick a model from the list |
 | `easyvision-model-text-only` | the picked model does not accept images | open Settings → EasyVision and pick a vision-capable model |
-| `easyvision-vision-failed` | the vision call itself failed (upstream error shown) | check the model/provider in Settings → EasyVision and its quota |
-| `easyvision-image-invalid` | the attached image failed validation | re-attach a valid PNG/JPG/WebP/GIF within the message limits |
+
+The image-count/byte limits and format validation stay with the harness (the
+same rules as for a vision-capable conversation model). If the vision call
+itself fails while the agent turn is running (upstream outage, quota), the
+request degrades to a short "could not describe it" note so the turn keeps
+working — the error the vision model returned is included in the note.
 
 A text-only conversation model with a **vision-capable** main model pick
 never consults the bridge: image blocks go straight to the model as before.

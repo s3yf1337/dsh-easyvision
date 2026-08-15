@@ -1,16 +1,21 @@
 // Smoke test for the dsh-easyvision image-admission bridge (lib/index.js).
 //
-// Two layers:
-//  1. The exported `describePromptContent` is exercised directly against a
-//     fake harness ctx (llm/attachments): happy path (images described, the
-//     returned content is text-only, the user text is used as the vision
-//     prompt), and every failure path maps to a stable EasyVisionBridgeError
-//     wire code.
-//  2. The `easyvision` service registration is checked against a REAL Cordis
-//     context (from the dsh install): loading the plugin provides the
-//     service, `ctx.get("easyvision")` resolves it while the plugin is
-//     active, and unregistering (plugin stop) makes the strict get answer
-//     `undefined` again — the exact contract the patched host relies on.
+// Layers:
+//  1. `checkPromptContent` — the admission health check the patched host
+//     calls: silent when the plugin resolves a vision-capable model, coded
+//     EasyVisionBridgeError otherwise.
+//  2. `transformRequest` — the request-time transform: image blocks in user
+//     messages are replaced by the EasyVision description only when the
+//     REQUEST's model is text-only; vision-capable models and image-free
+//     requests pass through untouched; failures degrade to a note; repeated
+//     requests hit the cache.
+//  3. `installRequestTransform` — against a REAL Cordis context with a fake
+//     llm service carrying a Cordis tracker: both dispatch paths
+//     (`prepareCall(...).stream(request)` and `stream(request)`) hand the
+//     adapter the transformed request, and the disposer restores the
+//     originals.
+//  4. Service registration on a real Cordis context: active plugin answers
+//     `ctx.get("easyvision")`, a stopped plugin disappears.
 //
 // Run: node test/plugin-bridge-smoke.mjs  (set DSH_NM when dsh lives
 // elsewhere than the default below)
@@ -18,14 +23,16 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const DSH_NM = process.env.DSH_NM || "/home/seyf/.local/lib/node_modules/@deepseek-ai/dsh/node_modules";
-const { Context } = require(DSH_NM + "/@deepseek-ai/cordis");
+const { Context, Service } = require(DSH_NM + "/@deepseek-ai/cordis");
 
 const plugin = await import("../lib/index.js");
-const { describePromptContent, EasyVisionBridgeError } = plugin;
+const { checkPromptContent, transformRequest, installRequestTransform, EasyVisionBridgeError } = plugin;
 
 // ── shared fakes ──────────────────────────────────────────────────────────
-const IMAGE_PART = { type: "image", mediaType: "image/png", data: Buffer.from("fake-png-bytes").toString("base64"), name: "shot.png" };
-const TEXT_PART = { type: "text", text: "what's in this picture?" };
+const REF = { attachmentId: "att-1", mediaType: "image/png", bytes: 64, width: 640, height: 480 };
+const IMAGE_BLOCK = { type: "image", attachment: REF };
+const TEXT_BLOCK = { type: "text", text: "what's in this picture?" };
+const USER_MESSAGE = { id: "msg-1", role: "user", content: [TEXT_BLOCK, IMAGE_BLOCK], source: { kind: "user" } };
 
 /** A vision stream: one text block then a clean finish. */
 async function* visionStream(description) {
@@ -35,24 +42,14 @@ async function* visionStream(description) {
 	yield { type: "finish", reason: { kind: "complete" } };
 }
 
-function fakeCtx({ models, streamImpl = () => visionStream("A red car on a sunny street."), limits, failSave = false } = {}) {
+function fakeCtx({ requestModels = {}, streamImpl = () => visionStream("A red car on a sunny street.") } = {}) {
 	const seen = { streamOptions: [] };
-	const attachments = {
-		imageLimits: limits ?? { maxImagesPerMessage: 4, maxImageBytes: 10 * 1024 * 1024, maxMessageImageBytes: 20 * 1024 * 1024, mediaTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"] },
-		async validateImage() {},
-		async saveImage(input) {
-			if (failSave) throw new Error("durable store exploded");
-			seen.saved = input;
-			return { attachmentId: "att-1", mediaType: input.mediaType, bytes: input.data.byteLength, width: 640, height: 480 };
-		}
-	};
 	return {
-		get: (name) => name === "attachments" ? attachments : void 0,
+		get: () => void 0,
 		llm: {
 			async resolveModelInfo(provider, model) {
-				if (!(provider in models)) throw new Error(`unknown provider ${provider}`);
-				const info = models[provider][model];
-				if (info === void 0) throw new Error(`unknown model ${model}`);
+				const info = requestModels[provider]?.[model];
+				if (info === void 0) throw new Error(`unknown model ${provider}/${model}`);
 				return info;
 			},
 			stream(options) {
@@ -60,7 +57,6 @@ function fakeCtx({ models, streamImpl = () => visionStream("A red car on a sunny
 				return streamImpl(options);
 			}
 		},
-		attachments,
 		seen
 	};
 }
@@ -68,7 +64,7 @@ function fakeCtx({ models, streamImpl = () => visionStream("A red car on a sunny
 const config = { provider: "opencode-go", model: "qwen3.7-plus", systemPrompt: "You are a vision assistant.", defaultPrompt: "Describe what you see." };
 const settingsSource = () => void 0; // entry base layer only
 
-const VISION_MODELS = {
+const MODELS = {
 	"opencode-go": {
 		"qwen3.7-plus": { inputModalities: ["text", "image"] },
 		"deepseek-v4-flash": { inputModalities: ["text"] }
@@ -79,108 +75,177 @@ function assert(condition, message) {
 	if (!condition) throw new Error(message);
 }
 
-// ── 1. happy path ─────────────────────────────────────────────────────────
+// ── 1. checkPromptContent: admission health check ─────────────────────────
 {
-	const ctx = fakeCtx({ models: VISION_MODELS });
-	const out = await describePromptContent(ctx, config, settingsSource, [TEXT_PART, IMAGE_PART]);
-	assert(out.length === 2, `expected 2 text parts, got ${JSON.stringify(out.length)}`);
-	assert(out[0].type === "text" && out[0].text === TEXT_PART.text, "user text must be preserved");
-	assert(out[1].type === "text", "description part must be text");
-	assert(out[1].text.includes("A red car on a sunny street."), "description must be embedded");
-	assert(out[1].text.includes("opencode-go/qwen3.7-plus"), "description must name the vision model");
-	assert(out[1].text.startsWith("[Attached image —"), "single-image label expected");
-	// the vision message must carry the image refs and the USER text as prompt
-	const visionMessage = ctx.seen.streamOptions[0].messages[0];
-	const imageBlocks = visionMessage.content.filter((block) => block.type === "image");
-	assert(imageBlocks.length === 1 && imageBlocks[0].attachment.attachmentId === "att-1", "vision message must carry the saved image ref");
-	const promptBlock = visionMessage.content.find((block) => block.type === "text");
-	assert(promptBlock.text === TEXT_PART.text, "user text must be the vision prompt");
-	console.log("bridge happy path OK (text preserved, image described, vision prompt = user text)");
+	const healthy = fakeCtx({ requestModels: MODELS });
+	await checkPromptContent(healthy, config, settingsSource, [TEXT_BLOCK, IMAGE_BLOCK]);
+	console.log("checkPromptContent healthy OK (no throw)");
 }
-
-// ── 2. no user text → default prompt is the vision question ───────────────
 {
-	const ctx = fakeCtx({ models: VISION_MODELS });
-	const out = await describePromptContent(ctx, config, settingsSource, [IMAGE_PART]);
-	assert(out.length === 1 && out[0].type === "text", "image-only message must yield one text part");
-	const visionMessage = ctx.seen.streamOptions[0].messages[0];
-	const promptBlock = visionMessage.content.find((block) => block.type === "text");
-	assert(promptBlock.text === config.defaultPrompt, "default prompt must be used without user text");
-	console.log("bridge default-prompt fallback OK");
-}
-
-// ── 3. multiple images → aggregate label ──────────────────────────────────
-{
-	const ctx = fakeCtx({ models: VISION_MODELS });
-	const out = await describePromptContent(ctx, config, settingsSource, [IMAGE_PART, { ...IMAGE_PART, name: "second.png" }]);
-	assert(out.length === 1 && out[0].text.startsWith("[Attached images (2) —"), "multi-image label expected");
-	assert(ctx.seen.saved !== void 0, "images must be committed through saveImage");
-	console.log("bridge multi-image label OK");
-}
-
-// ── 4. model not in the list → easyvision-not-configured ──────────────────
-{
-	const ctx = fakeCtx({ models: VISION_MODELS });
+	const ctx = fakeCtx({ requestModels: MODELS });
 	let caught;
 	try {
-		await describePromptContent(ctx, { ...config, model: "mimo-v2.5" }, settingsSource, [IMAGE_PART]);
+		await checkPromptContent(ctx, { ...config, model: "mimo-v2.5" }, settingsSource, [IMAGE_BLOCK]);
 	} catch (error) {
 		caught = error;
 	}
 	assert(caught instanceof EasyVisionBridgeError && caught.code === "easyvision-not-configured", `expected easyvision-not-configured, got ${caught?.code ?? "no throw"}`);
 	assert(caught.message.includes("Settings → EasyVision"), "message must point at Settings → EasyVision");
-	console.log("bridge unknown-model error code OK");
+	console.log("checkPromptContent unknown-model code OK");
 }
-
-// ── 5. text-only vision pick → easyvision-model-text-only ─────────────────
 {
-	const ctx = fakeCtx({ models: VISION_MODELS });
+	const ctx = fakeCtx({ requestModels: MODELS });
 	let caught;
 	try {
-		await describePromptContent(ctx, { ...config, model: "deepseek-v4-flash" }, settingsSource, [IMAGE_PART]);
+		await checkPromptContent(ctx, { ...config, model: "deepseek-v4-flash" }, settingsSource, [IMAGE_BLOCK]);
 	} catch (error) {
 		caught = error;
 	}
 	assert(caught instanceof EasyVisionBridgeError && caught.code === "easyvision-model-text-only", `expected easyvision-model-text-only, got ${caught?.code ?? "no throw"}`);
-	console.log("bridge text-only-pick error code OK");
+	console.log("checkPromptContent text-only-pick code OK");
 }
 
-// ── 6. image-count limit → easyvision-image-invalid ───────────────────────
+// ── 2. transformRequest: happy path (text-only request model) ─────────────
 {
-	const ctx = fakeCtx({ models: VISION_MODELS, limits: { maxImagesPerMessage: 1, maxImageBytes: 10 * 1024 * 1024, maxMessageImageBytes: 20 * 1024 * 1024 } });
-	let caught;
-	try {
-		await describePromptContent(ctx, config, settingsSource, [IMAGE_PART, { ...IMAGE_PART, name: "b.png" }]);
-	} catch (error) {
-		caught = error;
-	}
-	assert(caught instanceof EasyVisionBridgeError && caught.code === "easyvision-image-invalid", `expected easyvision-image-invalid, got ${caught?.code ?? "no throw"}`);
-	console.log("bridge image-count limit OK");
+	const ctx = fakeCtx({ requestModels: MODELS });
+	const assistant = { id: "msg-0", role: "assistant", content: [{ type: "text", text: "ok" }], source: { kind: "model" } };
+	const request = { provider: "opencode-go", model: "deepseek-v4-flash", messages: [assistant, USER_MESSAGE] };
+	const out = await transformRequest(ctx, config, settingsSource, request, new Map());
+	assert(out !== request, "a changed request must be a new object");
+	assert(out.messages[0] === assistant, "image-free messages must pass through untouched");
+	const described = out.messages[1];
+	assert(described.content.every((block) => block.type === "text"), "image blocks must be replaced by text");
+	const marker = described.content.find((block) => block.text.startsWith("[Attached image —"));
+	assert(marker !== void 0 && marker.text.includes("A red car on a sunny street."), "description marker expected");
+	assert(marker.text.includes("opencode-go/qwen3.7-plus"), "marker must name the vision model");
+	// the vision message must carry the SAME durable refs and the user text as prompt
+	const visionMessage = ctx.seen.streamOptions[0].messages[0];
+	assert(visionMessage.content.some((block) => block.type === "image" && block.attachment.attachmentId === "att-1"), "vision message must carry the durable image ref");
+	const promptBlock = visionMessage.content.find((block) => block.type === "text");
+	assert(promptBlock.text === TEXT_BLOCK.text, "user text must be the vision prompt");
+	console.log("transformRequest happy path OK (image → description for text-only model)");
 }
 
-// ── 7. vision call failure → easyvision-vision-failed ─────────────────────
+// ── 3. transformRequest: vision-capable model → untouched ─────────────────
 {
-	async function* failingStream() {
+	const ctx = fakeCtx({ requestModels: MODELS });
+	const request = { provider: "opencode-go", model: "qwen3.7-plus", messages: [USER_MESSAGE] };
+	const out = await transformRequest(ctx, config, settingsSource, request, new Map());
+	assert(out === request, "vision-capable model request must be the same object");
+	console.log("transformRequest vision-capable passthrough OK");
+}
+
+// ── 4. transformRequest: no images → untouched ────────────────────────────
+{
+	const ctx = fakeCtx({ requestModels: MODELS });
+	const request = { provider: "opencode-go", model: "deepseek-v4-flash", messages: [{ id: "m", role: "user", content: [{ type: "text", text: "hi" }] }] };
+	const out = await transformRequest(ctx, config, settingsSource, request, new Map());
+	assert(out === request, "image-free request must be the same object");
+	console.log("transformRequest image-free passthrough OK");
+}
+
+// ── 5. transformRequest: vision failure → graceful note ───────────────────
+{
+	async function* failingVisionStream() {
 		yield { type: "block-start", index: 0, blockType: "text" };
 		yield { type: "finish", reason: { kind: "error", failure: { code: "AUTH", message: "403 upstream" } } };
 	}
-	const ctx = fakeCtx({ models: VISION_MODELS, streamImpl: failingStream });
-	let caught;
-	try {
-		await describePromptContent(ctx, config, settingsSource, [IMAGE_PART]);
-	} catch (error) {
-		caught = error;
-	}
-	assert(caught instanceof EasyVisionBridgeError && caught.code === "easyvision-vision-failed", `expected easyvision-vision-failed, got ${caught?.code ?? "no throw"}`);
-	assert(caught.message.includes("AUTH"), "the upstream failure must surface in the message");
-	console.log("bridge vision-failure error code OK");
+	const ctx = fakeCtx({ requestModels: MODELS, streamImpl: failingVisionStream });
+	const request = { provider: "opencode-go", model: "deepseek-v4-flash", messages: [USER_MESSAGE] };
+	const out = await transformRequest(ctx, config, settingsSource, request, new Map());
+	assert(out !== request, "transform must still produce a request");
+	const note = out.messages[0].content[0].text;
+	assert(note.startsWith("[Image attached but EasyVision could not describe it:"), `expected failure note, got ${note}`);
+	assert(note.includes("AUTH"), "the upstream failure must surface in the note");
+	console.log("transformRequest vision-failure note OK");
 }
 
-// ── 8. registration on a real Cordis context ──────────────────────────────
+// ── 6. transformRequest: cache across repeated requests ───────────────────
+{
+	let calls = 0;
+	const ctx = fakeCtx({ requestModels: MODELS, streamImpl: () => { calls += 1; return visionStream("cached"); } });
+	const cache = new Map();
+	const request = { provider: "opencode-go", model: "deepseek-v4-flash", messages: [USER_MESSAGE] };
+	await transformRequest(ctx, config, settingsSource, request, cache);
+	await transformRequest(ctx, config, settingsSource, request, cache);
+	assert(calls === 1, `vision call must run once, ran ${calls} times`);
+	console.log("transformRequest cache OK");
+}
+
+// ── 7. installRequestTransform on a real Cordis context ───────────────────
 {
 	const app = new Context();
+	class FakeLlm extends Service {
+		constructor(ctx) {
+			super(ctx, "llm");
+			this.seen = { prepareStreamOptions: [], streamOptions: [] };
+		}
+		async resolveModelInfo(provider, model) {
+			// The fake harness knows the real catalog shapes: the vision model
+			// is image-capable, the conversation model is text-only.
+			return { inputModalities: model === "qwen3.7-plus" ? ["text", "image"] : ["text"] };
+		}
+		async prepareCall() {
+			return {
+				config: { provider: "opencode-go", model: "deepseek-v4-flash" },
+				stream: (options) => {
+					this.seen.prepareStreamOptions.push(options);
+					return visionStream("A red car on a sunny street.");
+				}
+			};
+		}
+		stream(options) {
+			this.seen.streamOptions.push(options);
+			return visionStream("A red car on a sunny street.");
+		}
+	}
+	const llm = new FakeLlm(app);
+	const dispose = installRequestTransform(app, config, settingsSource);
+	const request = { provider: "opencode-go", model: "deepseek-v4-flash", messages: [USER_MESSAGE] };
+
+	const prepared = await app.llm.prepareCall({ provider: "opencode-go", model: "deepseek-v4-flash" });
+	const preparedStream = prepared.stream(request);
+	for await (const chunk of preparedStream) { /* drain */ }
+	assert(llm.seen.prepareStreamOptions.length === 1, "prepareCall stream must receive the request");
+	const preparedMessages = llm.seen.prepareStreamOptions[0].messages;
+	assert(preparedMessages[0].content.every((block) => block.type === "text"), "prepareCall path must hand the adapter text-only messages");
+	assert(preparedMessages[0].content.some((block) => block.text.includes("A red car")), "prepareCall path must include the description");
+
+	const directBefore = llm.seen.streamOptions.length;
+	const directStream = app.llm.stream(request);
+	for await (const chunk of directStream) { /* drain */ }
+	// The description is already cached from the prepareCall path, so only the
+	// main request reaches the adapter again.
+	assert(llm.seen.streamOptions.length === directBefore + 1, "direct path must stream the main request");
+	const directMain = llm.seen.streamOptions[llm.seen.streamOptions.length - 1];
+	assert(directMain.messages[0].content.some((block) => block.text.includes("A red car")), "direct stream path must include the description");
+	console.log("installRequestTransform OK (both dispatch paths transform, adapter sees text)");
+
+	dispose();
+	const prepared2 = await app.llm.prepareCall({ provider: "opencode-go", model: "deepseek-v4-flash" });
+	const stream2 = prepared2.stream(request);
+	for await (const chunk of stream2) { /* drain */ }
+	assert(llm.seen.prepareStreamOptions.length === 2, "disposed transform must restore the original prepareCall");
+	const restoredMessages = llm.seen.prepareStreamOptions[1].messages;
+	assert(restoredMessages[0].content.some((block) => block.type === "image"), "restored prepareCall must hand the adapter the ORIGINAL image blocks");
+	console.log("installRequestTransform disposer OK (originals restored)");
+	// The app and its fake llm service die with the process; nothing else to unwind.
+}
+
+// ── 8. service registration on a real Cordis context ──────────────────────
+{
+	const app = new Context();
+	class FakeLlm extends Service {
+		constructor(ctx) {
+			super(ctx, "llm");
+		}
+		async resolveModelInfo() { return { inputModalities: ["text", "image"] }; }
+		stream() { throw new Error("not used"); }
+		listProviders() { return []; }
+		prepareCall() { throw new Error("not used"); }
+	}
+	new FakeLlm(app);
 	app.provide("tools", { register() {} });
-	app.provide("llm", { async resolveModelInfo() { return { inputModalities: ["text", "image"] }; }, stream() { throw new Error("not used"); }, listProviders() { return []; } });
 	app.provide("fs", {});
 	app.provide("systemPrompt", { section() {} });
 	app.provide("settings", {});
@@ -192,9 +257,7 @@ function assert(condition, message) {
 	}, {});
 	await fiber;
 	const service = app.get("easyvision");
-	assert(service !== void 0 && typeof service.describePromptContent === "function", "ctx.get(\"easyvision\") must resolve the bridge service while the plugin is active");
-	const appCtx = app; // root context reads the same shared store
-	assert(appCtx.get("easyvision") === service, "root context must see the same service");
+	assert(service !== void 0 && typeof service.checkPromptContent === "function", "ctx.get(\"easyvision\") must resolve the bridge service with checkPromptContent");
 	console.log("bridge service registration OK (active plugin resolves ctx.get(\"easyvision\"))");
 	await fiber.dispose();
 	const after = app.get("easyvision");

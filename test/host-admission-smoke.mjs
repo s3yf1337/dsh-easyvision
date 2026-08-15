@@ -95,7 +95,7 @@ const request = (content, mode = "queue") => ({
 // ── 1. image-capable model: admitted untouched, bridge never consulted ─────
 {
 	let consulted = false;
-	const vision = { describePromptContent: () => { consulted = true; throw new Error("must not be called"); } };
+	const vision = { checkPromptContent: () => { consulted = true; throw new Error("must not be called"); } };
 	const { api, agent, calls } = harness({ modelInfo: IMAGE_CAPABLE, vision, model: "qwen3.7-plus" });
 	const response = await api.sessions.prompt(request([TEXT_PART, IMAGE_PART]));
 	assert(response.result.ok === true && response.result.value.accepted === true, `image-capable model must admit, got ${JSON.stringify(response.result)}`);
@@ -119,34 +119,26 @@ const request = (content, mode = "queue") => ({
 	console.log("text-only + plugin absent OK (easyvision-unavailable, actionable message)");
 }
 
-// ── 3. text-only model + healthy plugin: image described, prompt admitted ──
+// ── 3. text-only model + healthy plugin: admitted WITH the image blocks ───
 {
+	let checked = 0;
 	const vision = {
-		async describePromptContent(content) {
-			const text = content.filter((part) => part.type === "text").map((part) => part.text).join(" ");
-			return [
-				...content.filter((part) => part.type === "text"),
-				{ type: "text", text: `[Attached image — described by opencode-go/qwen3.7-plus via EasyVision: ${text} → "a red car"]` }
-			];
-		}
+		async checkPromptContent() { checked += 1; }
 	};
 	const { api, agent, calls } = harness({ modelInfo: TEXT_ONLY, vision });
 	const response = await api.sessions.prompt(request([TEXT_PART, IMAGE_PART]));
 	assert(response.result.ok === true && response.result.value.accepted === true, `healthy bridge must admit, got ${JSON.stringify(response.result)}`);
-	assert(calls.followup.length === 1, "followup must be called with the described message");
+	assert(checked === 1, "checkPromptContent must be consulted");
+	assert(calls.followup.length === 1, "followup must be called with the message");
 	const content = calls.followup[0].content;
-	assert(content.length === 2 && content.every((block) => block.type === "text"), "admitted message must be text-only");
-	assert(content[1].text.includes("a red car"), "description must be in the admitted message");
-	console.log("text-only + healthy plugin OK (prompt admitted with the description as text)");
+	assert(content.some((block) => block.type === "image"), "the admitted message must KEEP the image block (the chat shows the picture)");
+	assert(content.some((block) => block.type === "text" && block.text === TEXT_PART.text), "the user text must be preserved");
+	console.log("text-only + healthy plugin OK (admitted with the real image blocks, no text dump)");
 }
 
-// ── 4. text-only model + steer mode: steer receives the described message ──
+// ── 4. text-only model + steer mode: steer receives the message ───────────
 {
-	const vision = {
-		async describePromptContent(content) {
-			return [...content.filter((part) => part.type === "text"), { type: "text", text: "[Attached image — described via EasyVision: x]" }];
-		}
-	};
+	const vision = { async checkPromptContent() {} };
 	const { api, calls } = harness({ modelInfo: TEXT_ONLY, vision });
 	const response = await api.sessions.prompt(request([IMAGE_PART], "steer"));
 	assert(response.result.ok === true, "steer must admit too");
@@ -157,7 +149,7 @@ const request = (content, mode = "queue") => ({
 // ── 5. text-only model + broken plugin: the bridge's wire code surfaces ───
 {
 	const vision = {
-		describePromptContent() {
+		checkPromptContent() {
 			const error = new Error("the model picked in Settings → EasyVision does not accept images; pick a vision-capable model there");
 			error.code = "easyvision-model-text-only";
 			throw error;
