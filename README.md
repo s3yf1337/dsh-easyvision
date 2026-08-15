@@ -1,6 +1,6 @@
 # dsh-easyvision
 
-![version](https://img.shields.io/badge/version-0.3.1-blue)
+![version](https://img.shields.io/badge/version-0.4.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![dsh](https://img.shields.io/badge/dsh-plugin-4B32C3)
 
@@ -15,8 +15,18 @@ harness's own LLM runtime.
 
 Your main model (e.g. `deepseek-v4-flash`) is text-only, so dsh's built-in
 `read_image` tool refuses to send image blocks to it. dsh-easyvision fixes
-that by registering one extra tool — `describe_image` — which hands the
-picture to a vision-capable model and returns the description as plain text.
+that in two complementary ways:
+
+- **Attached images in the web chat just work.** When you drop an image into
+  the composer and send it, the message is admitted and the image is
+  described through the vision model — no more "The current model does not
+  support images; switch to a model that does" refusal. This happens only
+  while the plugin is active, configured, and resolves a vision-capable
+  model; if anything is wrong with the plugin you get an actionable
+  "configure EasyVision" error instead.
+- **`describe_image` tool** — the model can also inspect image *files* on its
+  own by calling the tool, which hands the picture to the vision-capable
+  model and returns the description as plain text.
 
 No external API keys. No extra plumbing. Just a model that can see, picked
 from the models you already have.
@@ -31,6 +41,8 @@ from the models you already have.
 - **Live configuration** — model changes apply immediately, no restart
 - **Multiple images per call** — validated PNG/JPEG/WebP/GIF, same
   attachment pipeline as `read_image`
+- **Composer image drops** — images attached to a chat message are described
+  automatically when the conversation model is text-only
 
 ## Screenshots
 
@@ -64,19 +76,31 @@ $ dsh "what's in testpics/1.jpg?"
 
 ## How it works
 
+Two entry points, one pipeline:
+
 ```
-main model (text-only) ──describe_image(paths, prompt?)──▶ plugin
-                                                              │
-                                            ctx.fs.readBytes (sandbox-aware reads)
-                                                              │
-                                  ctx.attachments.saveImage (durable image refs)
-                                                              │
-                        ctx.llm.stream(provider, model, messages=[image blocks + prompt])
-                                                              │
-                              vision model (e.g. qwen3.7-plus)
-                                                              │
-                        description text ──▶ main model
+composer: drop an image into the chat  ──▶  host session.prompt admission
+                                              │  model text-only?
+                                              ▼
+                                    easyvision bridge (ctx service)
+                                              │  validate + save image
+                                              ▼
+                         ctx.llm.stream(provider, model, messages=[image blocks + prompt])
+                                              │
+                                   vision model (e.g. qwen3.7-plus)
+                                              │
+                         description text ──▶ admitted as the user message
+
+model turn: describe_image(paths, prompt?) ──▶ same vision pipeline, called as a tool
 ```
+
+The `install.sh` / `scripts/patch-dsh-host.mjs` host patch changes the
+`session.prompt` admission: when the conversation model is text-only and the
+message carries images, the host asks the plugin's `easyvision` service to
+describe them instead of refusing outright. The prompt is admitted **only**
+when the service is present (plugin active) and the configured model resolves
+and declares `image` input (plugin configured and healthy). Otherwise the
+client gets an actionable error naming the fix (see Troubleshooting).
 
 The plugin validates the configured model against your dsh model list and
 refuses to run when it is missing or does not declare `image` input — before
@@ -117,6 +141,25 @@ the profile-level defaults.
 </details>
 
 <details>
+<summary>Attaching an image says the plugin is not active or misconfigured</summary>
+
+Sending an image to a text-only conversation model is admitted only while
+the `easyvision` service is active and resolves a vision-capable model. The
+error code tells you what to fix:
+
+| Code | Meaning | Fix |
+|---|---|---|
+| `easyvision-unavailable` | the plugin is not loaded/active in this profile | add it to the profile (`install.sh`, or the `cordis.patch.yml` row) and restart |
+| `easyvision-not-configured` | the resolved vision model is not in your dsh model list | open Settings → EasyVision and pick a model from the list |
+| `easyvision-model-text-only` | the picked model does not accept images | open Settings → EasyVision and pick a vision-capable model |
+| `easyvision-vision-failed` | the vision call itself failed (upstream error shown) | check the model/provider in Settings → EasyVision and its quota |
+| `easyvision-image-invalid` | the attached image failed validation | re-attach a valid PNG/JPG/WebP/GIF within the message limits |
+
+A text-only conversation model with a **vision-capable** main model pick
+never consults the bridge: image blocks go straight to the model as before.
+</details>
+
+<details>
 <summary><code>AUTH</code> errors from the vision model</summary>
 
 Model choice matters for quotas. On the opencode.ai Zen GO plan
@@ -151,7 +194,8 @@ model from your list.
            model: qwen3.7-plus
    ```
 
-3. Expose the settings namespace to the web client:
+3. Patch the installed host so the Settings page exposes the namespace AND
+   `session.prompt` admits images through the bridge:
    `node scripts/patch-dsh-host.mjs` (one-time; re-run after dsh upgrades).
 4. Restart the harness. The model must be present in your dsh model list
    (`~/.dsh/settings.yaml` or Settings → Models) and the provider must

@@ -19,7 +19,8 @@
 #      the package declares dsh.bundle.patch — dsh applies that bundle patch
 #      itself, so a manual row would be a duplicate)
 #   4. patches the installed dsh-host-apiproxy so the Settings page can
-#      expose the easyvision namespace (scripts/patch-dsh-host.mjs)
+#      expose the easyvision namespace AND session.prompt admits attached
+#      images through the easyvision bridge (scripts/patch-dsh-host.mjs)
 #   5. restarts the profile (unless --no-restart)
 #
 set -euo pipefail
