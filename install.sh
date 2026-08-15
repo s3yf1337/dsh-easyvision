@@ -15,7 +15,9 @@
 # What it does (all idempotent, safe to re-run):
 #   1. puts the plugin at $DSH_HOME/plugins/dsh-easyvision
 #   2. registers it in the profile's package.json + node_modules
-#   3. adds the easyvision row to the profile's cordis.patch.yml
+#   3. adds the easyvision row to the profile's cordis.patch.yml (skipped when
+#      the package declares dsh.bundle.patch — dsh applies that bundle patch
+#      itself, so a manual row would be a duplicate)
 #   4. patches the installed dsh-host-apiproxy so the Settings page can
 #      expose the easyvision namespace (scripts/patch-dsh-host.mjs)
 #   5. restarts the profile (unless --no-restart)
@@ -138,15 +140,22 @@ fi
 ln -s "$PLUGIN_DIR" "$PROFILE_DIR/node_modules/dsh-easyvision"
 
 # ── 4. cordis.patch.yml row (idempotent) ──────────────────────────────────
-if grep -q "dsh-easyvision" "$PATCH_FILE" 2>/dev/null; then
-	echo "patch row already present"
+# When the package declares dsh.bundle.patch, dsh applies that bundle's patch
+# itself, so the bundle `cordis.patch.yml` already carries the easyvision
+# insert row. Inserting a row here too would produce a duplicate plugin entry,
+# so skip this step entirely for bundle-declaring packages.
+if grep -q '"bundle"' "$PLUGIN_DIR/package.json" 2>/dev/null; then
+	echo "package ships dsh.bundle.patch — skipping manual cordis.patch.yml row (dsh applies the bundle patch)"
 else
-	# A fresh profile patch is just `[]` — drop the bare line so appending
-	# the insert list keeps the file valid YAML.
-	if grep -q '^\[ *\]$' "$PATCH_FILE"; then
-		sed -i '/^\[ *\]$/d' "$PATCH_FILE"
-	fi
-	cat >> "$PATCH_FILE" <<'PATCH'
+	if grep -q "dsh-easyvision" "$PATCH_FILE" 2>/dev/null; then
+		echo "patch row already present"
+	else
+		# A fresh profile patch is just `[]` — drop the bare line so appending
+		# the insert list keeps the file valid YAML.
+		if grep -q '^\[ *\]$' "$PATCH_FILE"; then
+			sed -i '/^\[ *\]$/d' "$PATCH_FILE"
+		fi
+		cat >> "$PATCH_FILE" <<'PATCH'
 
 # dsh-easyvision: describe images through the dedicated vision model.
 # The model is chosen in Settings → EasyVision (the config here is only the
@@ -155,7 +164,8 @@ else
     - id: easyvision
       name: 'dsh-easyvision'
 PATCH
-	echo "patch row added"
+		echo "patch row added"
+	fi
 fi
 
 # ── 5. expose the settings namespace to the web client ────────────────────
