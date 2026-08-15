@@ -1,6 +1,6 @@
 {
   "name": "dsh-easyvision",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A DeepSeek Harness plugin that describes images through a dedicated vision model from the dsh model list, called over the harness's own LLM runtime. The vision model is configurable in Settings → EasyVision.",
   "type": "module",
   "main": "lib/index.js",

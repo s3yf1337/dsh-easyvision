@@ -27,7 +27,8 @@ const primitivesStub = {};
 for (const name of [
 	"IconDownloadOutline16", "IconRefreshOutline14", "IconGlobeOutline14",
 	"IconSettingsOutline16", "IconFolderOpenOutline16", "IconFolderOpen16",
-	"IconChevronLeftOutline14", "IconChevronRightOutline14", "IconCloseOutline16"
+	"IconChevronLeftOutline14", "IconChevronRightOutline14", "IconCloseOutline16",
+	"IconChevronDownOutline14", "IconCheckOutline16"
 ]) {
 	primitivesStub[name] = () => h("svg", { "data-icon": name });
 }
@@ -37,6 +38,26 @@ primitivesStub.Pill = Primitive;
 primitivesStub.StateDot = () => null;
 primitivesStub.Menu = () => null;
 primitivesStub.Modal = () => null;
+
+// Minimal DOM for the CSS-injection path (the picker styles land in a
+// data-plugin-css style tag when a document exists).
+const styleTags = [];
+globalThis.document = {
+	querySelector: (selector) => styleTags.find((tag) => tag.matches(selector)) ?? null,
+	createElement: (name) => ({
+		tagName: name.toUpperCase(),
+		dataset: {},
+		set textContent(value) { this._text = value; },
+		get textContent() { return this._text; },
+		matches(selector) {
+			const match = /data-plugin-css="([^"]+)"/.exec(selector);
+			return match !== null && this.dataset.pluginCss === match[1];
+		}
+	}),
+	head: {
+		appendChild: (tag) => { styleTags.push(tag); }
+	}
+};
 
 globalThis.window = {
 	__ModuleLoader__: {
@@ -61,6 +82,9 @@ if (!plugin || typeof plugin.apply !== "function" || !Array.isArray(plugin.injec
 	throw new Error("client.js did not export apply/inject");
 }
 console.log("client.js loaded; inject =", JSON.stringify(plugin.inject));
+const pickerCss = styleTags.find((tag) => tag.dataset.pluginCss === "dsh-easyvision/ModelSelect.module.css");
+if (!pickerCss || !pickerCss.textContent.includes("._ev_menu")) throw new Error("picker CSS was not injected");
+console.log("picker CSS injected OK");
 
 // ── mock settings scope over a memory store ──────────────────────────────
 // A CLASS with prototype methods backed by `this.store`, exactly like the
@@ -159,37 +183,37 @@ const section = registrations.find((r) => r.slot === "settings.section" && r.id 
 if (!section) throw new Error("settings.section registration missing");
 console.log("settings.section registered:", JSON.stringify({ id: section.id, order: section.order, label: section.label }));
 
-// ── picker option builder (pure) ─────────────────────────────────────────
+// ── picker row builder (pure) ────────────────────────────────────────────
 const groups = CATALOG.result.value.groups;
-const opts = plugin.pickerOptions(
-	{ status: "ready" },
-	groups,
-	"opencode-go",
-	"qwen3.7-plus",
-	true,
-	"opencode-go\u0000qwen3.7-plus"
-);
-if (opts.length !== 2) throw new Error(`expected 2 optgroups, got ${opts.length}`);
-if (opts[0].type !== "optgroup" || opts[0].props.label !== "opencode-go") throw new Error("first optgroup label mismatch");
-const qwen = opts[0].props.children.find((o) => o.props.value === "opencode-go\u0000qwen3.7-plus");
-if (!qwen || !qwen.props.children.includes("Qwen3.7 Plus")) throw new Error("qwen3.7-plus option missing from picker");
-const flash = opts[0].props.children.find((o) => o.props.value === "opencode-go\u0000deepseek-v4-flash");
-if (!flash) throw new Error("deepseek-v4-flash option missing from picker");
-// Fallback option for a selection absent from the catalog.
-const fallback = plugin.pickerOptions({ status: "ready" }, groups, "opencode-go", "mimo-v2.5", false, "opencode-go\u0000mimo-v2.5");
-if (fallback[0].props.value !== "opencode-go\u0000mimo-v2.5" || !String(fallback[0].props.children).includes("not in the model list")) {
-	throw new Error("fallback option for a missing model missing");
+const rows = plugin.pickerRows(groups, "opencode-go", "qwen3.7-plus");
+if (rows.length !== 2) throw new Error(`expected 2 groups, got ${rows.length}`);
+if (rows[0].groupTitle !== "opencode-go" || rows[0].options.length !== 3) throw new Error("first group mismatch");
+const qwen = rows[0].options.find((o) => o.value === "opencode-go\u0000qwen3.7-plus");
+if (!qwen || !qwen.selected || qwen.title !== "Qwen3.7 Plus") throw new Error("current model not marked selected");
+const flash = rows[0].options.find((o) => o.value === "opencode-go\u0000deepseek-v4-flash");
+if (!flash || flash.selected) throw new Error("unselected model marked selected");
+if (rows[1].groupTitle !== "DeepSeek Official") throw new Error("second group mismatch");
+// Fallback row for a selection absent from the catalog (the unlisted model
+// is also filtered out of its provider group so it is not duplicated).
+const fallback = plugin.pickerRows(groups, "opencode-go", "mimo-v2.5");
+if (!fallback[0] || fallback[0].value !== "opencode-go\u0000mimo-v2.5" || !fallback[0].description.includes("not in the model list")) {
+	throw new Error("fallback row for a missing model missing");
 }
-console.log("picker option builder OK (optgroups, models, fallback for unlisted model)");
+if (fallback[0].options !== void 0) throw new Error("fallback row must be a plain row, not a group");
+const opencodeGroup = fallback.find((r) => r.groupTitle === "opencode-go");
+if (opencodeGroup && opencodeGroup.options.some((o) => o.key === "mimo-v2.5")) {
+	throw new Error("unlisted model duplicated inside its provider group");
+}
+console.log("picker row builder OK (groups, selection marks, fallback for unlisted model)");
 
 // ── render the section with the injected scope ───────────────────────────
 const Section = section.component;
 const injected = section.injected;
 const html = renderToString(h(Section, { ...injected, close: () => {} }));
-for (const expected of ["EasyVision", "Vision model", "Advanced", "Max tokens", "System prompt", "Default prompt", "live"]) {
+for (const expected of ["EasyVision", "Vision model", "opencode-go / qwen3.7-plus", "Advanced", "Max tokens", "System prompt", "Default prompt", "live"]) {
 	if (!html.includes(expected)) throw new Error(`rendered section missing "${expected}"`);
 }
-console.log("section renders picker + advanced fold OK");
+console.log("section renders picker trigger + advanced fold OK");
 
 // ── interactions: write through the scope and re-render ──────────────────
 scope.set("model", "mimo-v2.5").then(async () => {
