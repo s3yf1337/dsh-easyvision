@@ -53,7 +53,11 @@ command -v node >/dev/null 2>&1 || { echo "error: node is required (dsh runs on 
 command -v dsh >/dev/null 2>&1 || { echo "error: dsh not found on PATH" >&2; exit 1; }
 
 # ── 1. source + destination ───────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When the script is piped in (curl … | bash) there is no script file, so
+# BASH_SOURCE is unset and `set -u` would abort on ${BASH_SOURCE[0]}. Fall
+# back to $0 ("bash" in that case) — SCRIPT_DIR then resolves to the caller's
+# cwd, which is fine: IN_CHECKOUT stays 0 and the clone branch below runs.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 IN_CHECKOUT=0
 if [ -f "$SCRIPT_DIR/package.json" ] && grep -q '"name"[[:space:]]*:[[:space:]]*"dsh-easyvision"' "$SCRIPT_DIR/package.json"; then
 	IN_CHECKOUT=1
